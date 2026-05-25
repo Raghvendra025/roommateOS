@@ -1,10 +1,10 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { authAPI } from '../services/api'
+import { authAPI, houseAPI } from '../services/api'
 import { connectSocket, disconnectSocket } from '../services/socket'
 
 const AuthContext = createContext(null)
 
-// ─── Helper: persist to localStorage ─────────────────────────────────────────
+// ─── LocalStorage helpers ─────────────────────────────────────────────────────
 const persistAuth = (token, user) => {
   localStorage.setItem('token', token)
   localStorage.setItem('user', JSON.stringify(user))
@@ -13,15 +13,17 @@ const persistAuth = (token, user) => {
 const clearAuth = () => {
   localStorage.removeItem('token')
   localStorage.removeItem('user')
+  localStorage.removeItem('houseId')
 }
 
 const getStoredAuth = () => {
   try {
-    const token = localStorage.getItem('token')
-    const user = JSON.parse(localStorage.getItem('user') || 'null')
-    return { token, user }
+    const token  = localStorage.getItem('token')
+    const user   = JSON.parse(localStorage.getItem('user') || 'null')
+    const houseId = localStorage.getItem('houseId') || null
+    return { token, user, houseId }
   } catch {
-    return { token: null, user: null }
+    return { token: null, user: null, houseId: null }
   }
 }
 
@@ -29,29 +31,35 @@ const getStoredAuth = () => {
 export function AuthProvider({ children }) {
   const stored = getStoredAuth()
 
-  const [user, setUser] = useState(stored.user)
-  const [token, setToken] = useState(stored.token)
-  const [loading, setLoading] = useState(!!stored.token) // true if we need to verify token
-  const [error, setError] = useState(null)
+  const [user,    setUser]    = useState(stored.user)
+  const [token,   setToken]   = useState(stored.token)
+  const [houseId, setHouseId] = useState(stored.houseId || stored.user?.currentHouse || null)
+  const [loading, setLoading] = useState(!!stored.token)
+  const [error,   setError]   = useState(null)
+
+  // Persist houseId whenever it changes
+  useEffect(() => {
+    if (houseId) localStorage.setItem('houseId', houseId)
+    else         localStorage.removeItem('houseId')
+  }, [houseId])
 
   // Verify token on mount — re-fetch user from /auth/me
   useEffect(() => {
-    if (!stored.token) {
-      setLoading(false)
-      return
-    }
+    if (!stored.token) { setLoading(false); return }
 
     authAPI.getMe()
       .then(({ data }) => {
         setUser(data.user)
         localStorage.setItem('user', JSON.stringify(data.user))
+        const hid = data.user?.currentHouse || stored.houseId
+        if (hid) setHouseId(hid)
         connectSocket(stored.token)
       })
       .catch(() => {
-        // Token expired or invalid
         clearAuth()
         setUser(null)
         setToken(null)
+        setHouseId(null)
       })
       .finally(() => setLoading(false))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -63,6 +71,7 @@ export function AuthProvider({ children }) {
     persistAuth(data.token, data.user)
     setToken(data.token)
     setUser(data.user)
+    if (data.user?.currentHouse) setHouseId(data.user.currentHouse)
     connectSocket(data.token)
     return data
   }, [])
@@ -74,6 +83,7 @@ export function AuthProvider({ children }) {
     persistAuth(data.token, data.user)
     setToken(data.token)
     setUser(data.user)
+    if (data.user?.currentHouse) setHouseId(data.user.currentHouse)
     connectSocket(data.token)
     return data
   }, [])
@@ -83,6 +93,7 @@ export function AuthProvider({ children }) {
     clearAuth()
     setUser(null)
     setToken(null)
+    setHouseId(null)
     disconnectSocket()
   }, [])
 
@@ -90,20 +101,52 @@ export function AuthProvider({ children }) {
   const updateUser = useCallback((updatedUser) => {
     setUser(updatedUser)
     localStorage.setItem('user', JSON.stringify(updatedUser))
+    if (updatedUser?.currentHouse) setHouseId(updatedUser.currentHouse)
   }, [])
+
+  // ─── Create house ────────────────────────────────────────────────────────
+  const createHouse = useCallback(async (houseData) => {
+    const { data } = await houseAPI.createHouse(houseData)
+    const newHouseId = data.house?._id || data.house?.id
+    if (newHouseId) {
+      setHouseId(newHouseId)
+      // also update user object
+      const updatedUser = { ...user, currentHouse: newHouseId }
+      setUser(updatedUser)
+      localStorage.setItem('user', JSON.stringify(updatedUser))
+    }
+    return data
+  }, [user])
+
+  // ─── Join house ──────────────────────────────────────────────────────────
+  const joinHouse = useCallback(async (inviteCode) => {
+    const { data } = await houseAPI.joinHouse({ inviteCode })
+    const newHouseId = data.house?._id || data.house?.id
+    if (newHouseId) {
+      setHouseId(newHouseId)
+      const updatedUser = { ...user, currentHouse: newHouseId }
+      setUser(updatedUser)
+      localStorage.setItem('user', JSON.stringify(updatedUser))
+    }
+    return data
+  }, [user])
 
   const value = {
     user,
     token,
+    houseId,
     loading,
     error,
     setError,
     isAuthenticated: !!token && !!user,
-    hasHouse: !!user?.currentHouse,
+    hasHouse: !!houseId,
     register,
     login,
     logout,
     updateUser,
+    createHouse,
+    joinHouse,
+    setHouseId,
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
